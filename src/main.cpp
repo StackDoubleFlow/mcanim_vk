@@ -1,3 +1,4 @@
+#include <optional>
 #include <stdexcept>
 
 #include <fmt/core.h>
@@ -18,15 +19,26 @@ const bool enableValidationLayers = false;
 const bool enableValidationLayers = true;
 #endif
 
+struct QueueFamilyIndices {
+  std::optional<uint32_t> graphicsFamily;
+
+  bool isComplete() { return graphicsFamily.has_value(); }
+};
+
 class Application {
 private:
   GLFWwindow *window;
   vk::Instance instance;
+  vk::PhysicalDevice physicalDevice;
+  vk::Device device;
+  vk::Queue graphicsQueue;
 
 public:
   Application() {
     initWindow();
     initVulkan();
+    pickPhysicalDevice();
+    createLogicalDevice();
   }
 
   void loop() {
@@ -36,7 +48,8 @@ public:
   }
 
   void cleanup() {
-    instance.destroy(nullptr);
+    device.destroy();
+    instance.destroy();
     glfwDestroyWindow(window);
     glfwTerminate();
   }
@@ -81,11 +94,62 @@ private:
         vk::Result::eSuccess) {
       throw std::runtime_error("failed to create instance!");
     }
+  }
 
-    for (auto extension : vk::enumerateInstanceExtensionProperties()) {
-      fmt::println("Found vulkan extension: {}",
-                   extension.extensionName.data());
+  bool isDeviceSuitable(vk::PhysicalDevice device) {
+    // auto properties = device.getProperties();
+    // auto features = device.getFeatures();
+    auto queueFamilies = findQueueFamilies(device);
+    return queueFamilies.isComplete();
+  }
+
+  void pickPhysicalDevice() {
+    for (auto device : instance.enumeratePhysicalDevices()) {
+      if (isDeviceSuitable(device)) {
+        physicalDevice = device;
+      }
     }
+
+    if (!physicalDevice) {
+      throw std::runtime_error("could not find a suitable physical device");
+    }
+  }
+
+  QueueFamilyIndices findQueueFamilies(vk::PhysicalDevice device) {
+    QueueFamilyIndices indices;
+
+    uint32_t i = 0;
+    for (const auto &queueFamily : device.getQueueFamilyProperties()) {
+      if (queueFamily.queueFlags & vk::QueueFlagBits::eGraphics) {
+        indices.graphicsFamily = i;
+
+        if (indices.isComplete())
+          break;
+      }
+
+      i++;
+    }
+
+    return indices;
+  }
+
+  void createLogicalDevice() {
+    auto indices = findQueueFamilies(physicalDevice);
+
+    auto queuePriority = 1.0f;
+    vk::DeviceQueueCreateInfo queueCreateInfo({}, *indices.graphicsFamily, 1,
+                                              &queuePriority);
+
+    vk::PhysicalDeviceFeatures deviceFeatures;
+
+    vk::DeviceCreateInfo createInfo({}, 1, &queueCreateInfo, 0, nullptr, 0,
+                                    nullptr, &deviceFeatures);
+    if (physicalDevice.createDevice(&createInfo, nullptr, &device) !=
+        vk::Result::eSuccess) {
+      throw std::runtime_error("failed to create logical device");
+    }
+
+    graphicsQueue = device.getQueue(*indices.graphicsFamily, 0);
   }
 };
 
