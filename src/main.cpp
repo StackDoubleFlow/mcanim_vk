@@ -32,11 +32,13 @@ private:
   vk::PhysicalDevice physicalDevice;
   vk::Device device;
   vk::Queue graphicsQueue;
+  vk::SurfaceKHR surface;
 
 public:
   Application() {
     initWindow();
-    initVulkan();
+    createInstance();
+    createSurface();
     pickPhysicalDevice();
     createLogicalDevice();
   }
@@ -49,6 +51,7 @@ public:
 
   void cleanup() {
     device.destroy();
+    instance.destroySurfaceKHR(surface);
     instance.destroy();
     glfwDestroyWindow(window);
     glfwTerminate();
@@ -65,7 +68,7 @@ private:
     window = glfwCreateWindow(WIDTH, HEIGHT, "mcanim_vk", nullptr, nullptr);
   }
 
-  void initVulkan() {
+  void createInstance() {
     const vk::ApplicationInfo appInfo("mcanim_vk", vk::ApiVersion10,
                                       "No Engine", vk::ApiVersion10,
                                       vk::ApiVersion10);
@@ -94,6 +97,15 @@ private:
         vk::Result::eSuccess) {
       throw std::runtime_error("failed to create instance!");
     }
+  }
+
+  void createSurface() {
+    VkSurfaceKHR surface_;
+    if (glfwCreateWindowSurface(instance, window, nullptr, &surface_) !=
+        VK_SUCCESS) {
+      throw std::runtime_error("failed to create window surface");
+    }
+    surface = surface_;
   }
 
   bool isDeviceSuitable(vk::PhysicalDevice device) {
