@@ -1,5 +1,6 @@
 #include <optional>
 #include <stdexcept>
+#include <unordered_set>
 
 #include <fmt/core.h>
 #include <vulkan/vulkan.hpp>
@@ -21,8 +22,11 @@ const bool enableValidationLayers = true;
 
 struct QueueFamilyIndices {
   std::optional<uint32_t> graphicsFamily;
+  std::optional<uint32_t> presentFamily;
 
-  bool isComplete() { return graphicsFamily.has_value(); }
+  bool isComplete() {
+    return graphicsFamily.has_value() && presentFamily.has_value();
+  }
 };
 
 class Application {
@@ -32,6 +36,7 @@ private:
   vk::PhysicalDevice physicalDevice;
   vk::Device device;
   vk::Queue graphicsQueue;
+  vk::Queue presentQueue;
   vk::SurfaceKHR surface;
 
 public:
@@ -134,11 +139,13 @@ private:
     for (const auto &queueFamily : device.getQueueFamilyProperties()) {
       if (queueFamily.queueFlags & vk::QueueFlagBits::eGraphics) {
         indices.graphicsFamily = i;
-
-        if (indices.isComplete())
-          break;
+      }
+      if (device.getSurfaceSupportKHR(i, surface)) {
+        indices.presentFamily = i;
       }
 
+      if (indices.isComplete())
+        break;
       i++;
     }
 
@@ -148,13 +155,18 @@ private:
   void createLogicalDevice() {
     auto indices = findQueueFamilies(physicalDevice);
 
+    std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
+    std::unordered_set<uint32_t> uniqueQueueFamilies = {*indices.graphicsFamily,
+                                                        *indices.presentFamily};
     auto queuePriority = 1.0f;
-    vk::DeviceQueueCreateInfo queueCreateInfo({}, *indices.graphicsFamily, 1,
-                                              &queuePriority);
+    for (auto queueFamily : uniqueQueueFamilies) {
+      queueCreateInfos.push_back({{}, queueFamily, 1, &queuePriority});
+    }
 
     vk::PhysicalDeviceFeatures deviceFeatures;
 
-    vk::DeviceCreateInfo createInfo({}, 1, &queueCreateInfo, 0, nullptr, 0,
+    vk::DeviceCreateInfo createInfo({}, queueCreateInfos.size(),
+                                    queueCreateInfos.data(), 0, nullptr, 0,
                                     nullptr, &deviceFeatures);
     if (physicalDevice.createDevice(&createInfo, nullptr, &device) !=
         vk::Result::eSuccess) {
@@ -162,6 +174,7 @@ private:
     }
 
     graphicsQueue = device.getQueue(*indices.graphicsFamily, 0);
+    presentQueue = device.getQueue(*indices.presentFamily, 0);
   }
 };
 
