@@ -53,6 +53,7 @@ private:
   std::vector<vk::Image> swapChainImages;
   vk::Format swapChainFormat;
   vk::Extent2D swapChainExtent;
+  std::vector<vk::ImageView> swapChainImageViews;
 
 public:
   Application() {
@@ -62,6 +63,7 @@ public:
     pickPhysicalDevice();
     createLogicalDevice();
     createSwapChain();
+    createImageViews();
   }
 
   void loop() {
@@ -71,6 +73,9 @@ public:
   }
 
   void cleanup() {
+    for (auto imageView : swapChainImageViews) {
+      device.destroyImageView(imageView);
+    }
     device.destroySwapchainKHR(swapChain);
     device.destroy();
     instance.destroySurfaceKHR(surface);
@@ -244,6 +249,17 @@ private:
     swapChainImages = device.getSwapchainImagesKHR(swapChain);
     swapChainFormat = surfaceFormat.format;
     swapChainExtent = extent;
+  }
+
+  void createImageViews() {
+    swapChainImageViews.resize(swapChainImages.size());
+
+    for (size_t i = 0; i < swapChainImages.size(); i++) {
+      vk::ImageSubresourceRange subresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+      vk::ImageViewCreateInfo createInfo({}, swapChainImages[i], vk::ImageViewType::e2D, swapChainFormat, {}, subresourceRange);
+
+      swapChainImageViews[i] = device.createImageView(createInfo);
+    }
   }
 
   void pickPhysicalDevice() {
