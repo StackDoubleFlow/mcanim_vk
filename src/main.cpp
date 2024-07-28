@@ -1,9 +1,11 @@
+#include <fstream>
 #include <optional>
 #include <stdexcept>
 #include <unordered_set>
 
 #include <fmt/core.h>
 #include <vulkan/vulkan.hpp>
+#include <vulkan/vulkan_enums.hpp>
 #include <vulkan/vulkan_handles.hpp>
 #include <vulkan/vulkan_structs.hpp>
 
@@ -24,6 +26,23 @@ const bool enableValidationLayers = false;
 #else
 const bool enableValidationLayers = true;
 #endif
+
+static std::vector<char> readFile(const std::string &filename) {
+  std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+  if (!file.is_open()) {
+    throw std::runtime_error("failed to open file!");
+  }
+
+  size_t fileSize = static_cast<size_t>(file.tellg());
+  std::vector<char> buffer(fileSize);
+
+  file.seekg(0);
+  file.read(buffer.data(), fileSize);
+  file.close();
+
+  return buffer;
+}
 
 struct QueueFamilyIndices {
   std::optional<uint32_t> graphicsFamily;
@@ -54,6 +73,9 @@ private:
   vk::Format swapChainFormat;
   vk::Extent2D swapChainExtent;
   std::vector<vk::ImageView> swapChainImageViews;
+  vk::RenderPass renderPass;
+  vk::PipelineLayout pipelineLayout;
+  vk::Pipeline graphicsPipeline;
 
 public:
   Application() {
@@ -64,6 +86,8 @@ public:
     createLogicalDevice();
     createSwapChain();
     createImageViews();
+    createRenderPass();
+    createGraphicsPipeline();
   }
 
   void loop() {
@@ -73,6 +97,9 @@ public:
   }
 
   void cleanup() {
+    device.destroyPipeline(graphicsPipeline);
+    device.destroyPipelineLayout(pipelineLayout);
+    device.destroyRenderPass(renderPass);
     for (auto imageView : swapChainImageViews) {
       device.destroyImageView(imageView);
     }
@@ -255,8 +282,11 @@ private:
     swapChainImageViews.resize(swapChainImages.size());
 
     for (size_t i = 0; i < swapChainImages.size(); i++) {
-      vk::ImageSubresourceRange subresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
-      vk::ImageViewCreateInfo createInfo({}, swapChainImages[i], vk::ImageViewType::e2D, swapChainFormat, {}, subresourceRange);
+      vk::ImageSubresourceRange subresourceRange(
+          vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+      vk::ImageViewCreateInfo createInfo({}, swapChainImages[i],
+                                         vk::ImageViewType::e2D,
+                                         swapChainFormat, {}, subresourceRange);
 
       swapChainImageViews[i] = device.createImageView(createInfo);
     }
@@ -317,6 +347,93 @@ private:
 
     graphicsQueue = device.getQueue(*indices.graphicsFamily, 0);
     presentQueue = device.getQueue(*indices.presentFamily, 0);
+  }
+
+  void createRenderPass() {
+    vk::AttachmentDescription colorAttachment(
+        {}, swapChainFormat, vk::SampleCountFlagBits::e1,
+        vk::AttachmentLoadOp::eClear, vk::AttachmentStoreOp::eStore,
+        vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
+        vk::ImageLayout::eUndefined, vk::ImageLayout::ePresentSrcKHR);
+    vk::AttachmentReference colorAttachmentRef(
+        0, vk::ImageLayout::eColorAttachmentOptimal);
+
+    vk::SubpassDescription subpass({}, vk::PipelineBindPoint::eGraphics);
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+
+    vk::RenderPassCreateInfo createInfo({}, 1, &colorAttachment, 1, &subpass);
+    renderPass = device.createRenderPass(createInfo);
+  }
+
+  vk::ShaderModule createShaderModule(const std::vector<char> &code) {
+    vk::ShaderModuleCreateInfo createInfo(
+        {}, code.size(), reinterpret_cast<const uint32_t *>(code.data()));
+    return device.createShaderModule(createInfo);
+  }
+
+  void createGraphicsPipeline() {
+    auto vertShaderCode = readFile("assets/shader.vert.spv");
+    auto fragShaderCode = readFile("assets/shader.frag.spv");
+    auto vertShaderModule = createShaderModule(vertShaderCode);
+    auto fragShaderModule = createShaderModule(fragShaderCode);
+
+    vk::PipelineShaderStageCreateInfo vertShaderStageInfo(
+        {}, vk::ShaderStageFlagBits::eVertex, vertShaderModule, "main");
+    vk::PipelineShaderStageCreateInfo fragShaderStageInfo(
+        {}, vk::ShaderStageFlagBits::eFragment, fragShaderModule, "main");
+    vk::PipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo,
+                                                        fragShaderStageInfo};
+
+    std::vector<vk::DynamicState> dynamicStates = {
+        vk::DynamicState::eViewport,
+        vk::DynamicState::eScissor,
+    };
+    vk::PipelineDynamicStateCreateInfo dynamicState({}, dynamicStates.size(),
+                                                    dynamicStates.data());
+
+    vk::PipelineVertexInputStateCreateInfo vertexInputInfo({}, 0, nullptr, 0,
+                                                           nullptr);
+
+    vk::PipelineInputAssemblyStateCreateInfo inputAssembly(
+        {}, vk::PrimitiveTopology::eTriangleList, vk::False);
+
+    vk::Viewport viewport(0.0f, 0.0f, static_cast<float>(swapChainExtent.width),
+                          static_cast<float>(swapChainExtent.height), 0.0f,
+                          1.0f);
+    vk::Rect2D scissor({0, 0}, swapChainExtent);
+    // We don't need to pass it in here because it's dynamic state, so we'll
+    // specify them at render time
+    vk::PipelineViewportStateCreateInfo viewportState({}, 1, nullptr, 1,
+                                                      nullptr);
+
+    vk::PipelineRasterizationStateCreateInfo rasterizer(
+        {}, vk::False, vk::False, vk::PolygonMode::eFill,
+        vk::CullModeFlagBits::eBack, vk::FrontFace::eClockwise, vk::False, 0.0f,
+        0.0f, 0.0f, 1.0f);
+
+    vk::PipelineMultisampleStateCreateInfo multisampling(
+        {}, vk::SampleCountFlagBits::e1, vk::False, 1.0f, nullptr, vk::False,
+        vk::False);
+
+    vk::PipelineColorBlendAttachmentState colorBlendAttachment(vk::False);
+    vk::PipelineColorBlendStateCreateInfo colorBlending(
+        {}, vk::False, vk::LogicOp::eCopy, 1, &colorBlendAttachment);
+
+    vk::PipelineLayoutCreateInfo pipelineLayoutCreateInfo({}, 0, nullptr, 0,
+                                                          nullptr);
+    pipelineLayout = device.createPipelineLayout(pipelineLayoutCreateInfo);
+
+    vk::GraphicsPipelineCreateInfo createInfo(
+        {}, 2, shaderStages, &vertexInputInfo, &inputAssembly, nullptr,
+        &viewportState, &rasterizer, &multisampling, nullptr, &colorBlending,
+        &dynamicState, pipelineLayout, renderPass, 0);
+
+    graphicsPipeline =
+        device.createGraphicsPipelines(nullptr, {createInfo}).value[0];
+
+    device.destroyShaderModule(vertShaderModule);
+    device.destroyShaderModule(fragShaderModule);
   }
 };
 
