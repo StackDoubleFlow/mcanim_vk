@@ -17,6 +17,8 @@
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
+const int MAX_FRAMES_IN_FLIGHT = 2;
+
 const std::vector<const char *> validationLayers = {
     "VK_LAYER_KHRONOS_validation"};
 
@@ -80,10 +82,11 @@ private:
   vk::Pipeline graphicsPipeline;
   std::vector<vk::Framebuffer> swapChainFrameBuffers;
   vk::CommandPool commandPool;
-  vk::CommandBuffer commandBuffer;
-  vk::Semaphore imageAvailableSemaphore;
-  vk::Semaphore renderFinishedSemaphore;
-  vk::Fence inFlightFence;
+  std::vector<vk::CommandBuffer> commandBuffers;
+  std::vector<vk::Semaphore> imageAvailableSemaphores;
+  std::vector<vk::Semaphore> renderFinishedSemaphores;
+  std::vector<vk::Fence> inFlightFences;
+  uint32_t current_frame = 0;
 
 public:
   Application() {
@@ -98,7 +101,7 @@ public:
     createGraphicsPipeline();
     createFramebuffers();
     createCommandPool();
-    createCommandBuffer();
+    createCommandBuffers();
     createSyncObjects();
   }
 
@@ -112,9 +115,11 @@ public:
   }
 
   void cleanup() {
-    device.destroySemaphore(imageAvailableSemaphore);
-    device.destroySemaphore(renderFinishedSemaphore);
-    device.destroyFence(inFlightFence);
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+      device.destroySemaphore(imageAvailableSemaphores[i]);
+      device.destroySemaphore(renderFinishedSemaphores[i]);
+      device.destroyFence(inFlightFences[i]);
+    }
     device.destroyCommandPool(commandPool);
     for (auto framebuffer : swapChainFrameBuffers) {
       device.destroyFramebuffer(framebuffer);
@@ -387,8 +392,8 @@ private:
     vk::SubpassDependency dependency(
         vk::SubpassExternal, 0,
         vk::PipelineStageFlagBits::eColorAttachmentOutput,
-        vk::PipelineStageFlagBits::eColorAttachmentOutput, {},
-        vk::AccessFlagBits::eColorAttachmentWrite);
+        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::AccessFlagBits::eNone, vk::AccessFlagBits::eColorAttachmentWrite);
 
     vk::RenderPassCreateInfo createInfo({}, 1, &colorAttachment, 1, &subpass, 1,
                                         &dependency);
@@ -485,10 +490,10 @@ private:
     commandPool = device.createCommandPool(createInfo);
   }
 
-  void createCommandBuffer() {
+  void createCommandBuffers() {
     vk::CommandBufferAllocateInfo allocInfo(
-        commandPool, vk::CommandBufferLevel::ePrimary, 1);
-    commandBuffer = device.allocateCommandBuffers(allocInfo)[0];
+        commandPool, vk::CommandBufferLevel::ePrimary, 2);
+    commandBuffers = device.allocateCommandBuffers(allocInfo);
   }
 
   void recordCommandBuffer(vk::CommandBuffer commandBuffer,
@@ -522,51 +527,63 @@ private:
   }
 
   void createSyncObjects() {
+    imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
     vk::SemaphoreCreateInfo semaphoreInfo;
     vk::FenceCreateInfo fenceInfo(vk::FenceCreateFlagBits::eSignaled);
-    if (device.createSemaphore(&semaphoreInfo, nullptr,
-                               &imageAvailableSemaphore) !=
-            vk::Result::eSuccess ||
-        device.createSemaphore(&semaphoreInfo, nullptr,
-                               &renderFinishedSemaphore) !=
-            vk::Result::eSuccess ||
-        device.createFence(&fenceInfo, nullptr, &inFlightFence) !=
-            vk::Result::eSuccess) {
-      throw std::runtime_error("failed to create semaphores");
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+      if (device.createSemaphore(&semaphoreInfo, nullptr,
+                                 &imageAvailableSemaphores[i]) !=
+              vk::Result::eSuccess ||
+          device.createSemaphore(&semaphoreInfo, nullptr,
+                                 &renderFinishedSemaphores[i]) !=
+              vk::Result::eSuccess ||
+          device.createFence(&fenceInfo, nullptr, &inFlightFences[i]) !=
+              vk::Result::eSuccess) {
+        throw std::runtime_error("failed to create semaphores");
+      }
     }
   }
 
   void drawFrame() {
-    if (device.waitForFences({inFlightFence}, vk::True,
+    // TODO: it looks like there's a race here but the spec doesn't say much
+    // about the implicit queue submisison ordering so I'm just going to assume
+    // the tutorials are correct.
+    if (device.waitForFences({inFlightFences[current_frame]}, vk::True,
                              std::numeric_limits<uint64_t>::max()) !=
         vk::Result::eSuccess) {
       throw std::runtime_error("failed to wait for in flight fence");
     }
-    device.resetFences(inFlightFence);
+    device.resetFences(inFlightFences[current_frame]);
     uint32_t imageIndex =
         device
-            .acquireNextImageKHR(swapChain,
-                                 std::numeric_limits<uint64_t>::max(),
-                                 imageAvailableSemaphore, nullptr)
+            .acquireNextImageKHR(
+                swapChain, std::numeric_limits<uint64_t>::max(),
+                imageAvailableSemaphores[current_frame], nullptr)
             .value;
 
-    commandBuffer.reset();
-    recordCommandBuffer(commandBuffer, imageIndex);
+    commandBuffers[current_frame].reset();
+    recordCommandBuffer(commandBuffers[current_frame], imageIndex);
 
     vk::PipelineStageFlags waitStages[] = {
         vk::PipelineStageFlagBits::eColorAttachmentOutput};
-    vk::SubmitInfo submitInfo(1, &imageAvailableSemaphore, waitStages, 1,
-                              &commandBuffer, 1, &renderFinishedSemaphore);
-    if (graphicsQueue.submit(1, &submitInfo, inFlightFence) !=
+    vk::SubmitInfo submitInfo(1, &imageAvailableSemaphores[current_frame],
+                              waitStages, 1, &commandBuffers[current_frame], 1,
+                              &renderFinishedSemaphores[current_frame]);
+    if (graphicsQueue.submit(1, &submitInfo, inFlightFences[current_frame]) !=
         vk::Result::eSuccess) {
       throw std::runtime_error("failed to submit draw command buffer");
     }
 
-    vk::PresentInfoKHR presentInfo(1, &renderFinishedSemaphore, 1, &swapChain,
-                                   &imageIndex, nullptr);
+    vk::PresentInfoKHR presentInfo(1, &renderFinishedSemaphores[current_frame],
+                                   1, &swapChain, &imageIndex, nullptr);
     if (presentQueue.presentKHR(&presentInfo) != vk::Result::eSuccess) {
       throw std::runtime_error("failed to present swap chain image");
     }
+
+    current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
   }
 };
 
