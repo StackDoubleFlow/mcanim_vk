@@ -87,6 +87,7 @@ private:
   std::vector<vk::Semaphore> renderFinishedSemaphores;
   std::vector<vk::Fence> inFlightFences;
   uint32_t current_frame = 0;
+  bool framebufferResized = false;
 
 public:
   Application() {
@@ -115,22 +116,16 @@ public:
   }
 
   void cleanup() {
+    cleanupSwapChain();
     for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
       device.destroySemaphore(imageAvailableSemaphores[i]);
       device.destroySemaphore(renderFinishedSemaphores[i]);
       device.destroyFence(inFlightFences[i]);
     }
     device.destroyCommandPool(commandPool);
-    for (auto framebuffer : swapChainFrameBuffers) {
-      device.destroyFramebuffer(framebuffer);
-    }
     device.destroyPipeline(graphicsPipeline);
     device.destroyPipelineLayout(pipelineLayout);
     device.destroyRenderPass(renderPass);
-    for (auto imageView : swapChainImageViews) {
-      device.destroyImageView(imageView);
-    }
-    device.destroySwapchainKHR(swapChain);
     device.destroy();
     instance.destroySurfaceKHR(surface);
     instance.destroy();
@@ -144,9 +139,18 @@ private:
 
     // glfw is made for opengl, but we're using vulkan
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
     window = glfwCreateWindow(WIDTH, HEIGHT, "mcanim_vk", nullptr, nullptr);
+    glfwSetWindowUserPointer(window, this);
+    glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+  }
+
+  static void framebufferResizeCallback(GLFWwindow *window, int width,
+                                        int height) {
+    auto *app =
+        reinterpret_cast<Application *>(glfwGetWindowUserPointer(window));
+    app->framebufferResized = true;
   }
 
   void createInstance() {
@@ -547,22 +551,53 @@ private:
     }
   }
 
+  void cleanupSwapChain() {
+    for (auto framebuffer : swapChainFrameBuffers) {
+      device.destroyFramebuffer(framebuffer);
+    }
+    for (auto imageView : swapChainImageViews) {
+      device.destroyImageView(imageView);
+    }
+    device.destroySwapchainKHR(swapChain);
+  }
+
+  void recreateSwapChain() {
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    // Wait until the framebuffer has a nonzero size
+    while (width == 0 || height == 0) {
+      glfwGetFramebufferSize(window, &width, &height);
+      glfwWaitEvents();
+    }
+
+    device.waitIdle();
+    cleanupSwapChain();
+
+    createSwapChain();
+    createImageViews();
+    createFramebuffers();
+  }
+
   void drawFrame() {
-    // TODO: it looks like there's a race here but the spec doesn't say much
-    // about the implicit queue submisison ordering so I'm just going to assume
-    // the tutorials are correct.
     if (device.waitForFences({inFlightFences[current_frame]}, vk::True,
                              std::numeric_limits<uint64_t>::max()) !=
         vk::Result::eSuccess) {
       throw std::runtime_error("failed to wait for in flight fence");
     }
+
+    auto acquireResult = device.acquireNextImageKHR(
+        swapChain, std::numeric_limits<uint64_t>::max(),
+        imageAvailableSemaphores[current_frame], nullptr);
+    if (acquireResult.result == vk::Result::eErrorOutOfDateKHR) {
+      recreateSwapChain();
+      return;
+    } else if (acquireResult.result != vk::Result::eSuccess &&
+               acquireResult.result != vk::Result::eSuboptimalKHR) {
+      throw std::runtime_error("failed to acquire swap chain image");
+    }
+    uint32_t imageIndex = acquireResult.value;
+
     device.resetFences(inFlightFences[current_frame]);
-    uint32_t imageIndex =
-        device
-            .acquireNextImageKHR(
-                swapChain, std::numeric_limits<uint64_t>::max(),
-                imageAvailableSemaphores[current_frame], nullptr)
-            .value;
 
     commandBuffers[current_frame].reset();
     recordCommandBuffer(commandBuffers[current_frame], imageIndex);
@@ -577,9 +612,17 @@ private:
       throw std::runtime_error("failed to submit draw command buffer");
     }
 
+    // TODO: If the second frame finishes first, the first frame will have to
+    // finish rendering and presenting first before the second frame can start
+    // presenting.
     vk::PresentInfoKHR presentInfo(1, &renderFinishedSemaphores[current_frame],
                                    1, &swapChain, &imageIndex, nullptr);
-    if (presentQueue.presentKHR(&presentInfo) != vk::Result::eSuccess) {
+    auto presentResult = presentQueue.presentKHR(&presentInfo);
+    if (presentResult == vk::Result::eErrorOutOfDateKHR ||
+        presentResult == vk::Result::eSuboptimalKHR || framebufferResized) {
+      recreateSwapChain();
+      framebufferResized = false;
+    } else if (presentResult != vk::Result::eSuccess) {
       throw std::runtime_error("failed to present swap chain image");
     }
 
